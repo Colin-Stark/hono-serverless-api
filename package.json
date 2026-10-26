@@ -1,0 +1,31 @@
+{
+  "name": "hono-serverless-floci",
+  "version": "0.0.1",
+  "description": "A simple hono server optimized to see the runtime on aws lambda",
+  "keywords": [
+    "API",
+    "hono",
+    "lamda",
+    "serverless"
+  ],
+  "author": "Collins Olokpedje",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "scripts": {
+    "typecheck": "tsc",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.mjs",
+    "zip": "powershell -NoProfile -Command \"Compress-Archive -Path dist/index.mjs -DestinationPath function.zip -Force\"",
+    "package": "pnpm typecheck && pnpm build && pnpm zip",
+    "deploy": "pnpm package && aws lambda update-function-code --function-name hono-api --zip-file fileb://function.zip"
+  },
+  "dependencies": {
+    "@hono/aws-lambda": "^1.0.1",
+    "hono": "^4.13.13"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.164",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}
