@@ -40,6 +40,22 @@ app.use(logger());
 const startupStart = Date.now();
 let startupLogged = false;
 
+// Log the cold-start duration on the first request. `startupStart` is captured
+// at module scope, so this runs once per cold start; warm invocations skip it.
+// The Node.js Lambda runtime captures stdout and sends it to CloudWatch Logs.
+app.use(async (c, next) => {
+	if (!startupLogged) {
+		startupLogged = true;
+		console.log(
+			JSON.stringify({
+				event: "cold-start",
+				durationMs: Date.now() - startupStart,
+			})
+		);
+	}
+	await next();
+});
+
 /**
  * The root endpoint that will return a simple text response.
  * This endpoint will return a text response with the message "Hello from Hono on AWS Lambda!".

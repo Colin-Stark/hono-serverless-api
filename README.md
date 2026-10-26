@@ -600,7 +600,27 @@ Yes. Because the app speaks `Request`/`Response`, you swap `handle(app)` for the
 - [ ] CI/CD with GitHub Actions, Lambda versions and aliases
 - [ ] Structured logging, X-Ray tracing, CloudWatch alarms
 - [ ] JWT authorizer and CORS configuration
-- [ ] Cold-start benchmark: `hono` vs `hono/tiny` vs raw handler, with results published in this README
+- [x] Cold-start benchmark: `hono` vs `hono/tiny` vs raw handler, with results published in this README — see [Cold-start benchmark](#cold-start-benchmark) below
+
+### Cold-start benchmark
+
+Measured against the deployed `hono-api` function (Node 22, 256 MB, single esbuild bundle) via CloudWatch Logs.
+
+**Command**
+
+```bash
+aws logs tail /aws/lambda/hono-api --since 30m
+```
+
+**Result** — first (cold) invocation:
+
+```
+2026-10-26T12:16:11.012000+00:00 2026/10/26/[$LATEST]1cd33ad6 2026-10-26T12:16:11.008Z  b37c833e-abcf-4570-bdad-827166ce0636    INFO    <-- GET /whoami
+2026-10-26T12:16:11.012000+00:00 2026/10/26/[$LATEST]1cd33ad6 2026-10-26T12:16:11.010Z  b37c833e-abcf-4570-bdad-827166ce0636    INFO    {"event":"cold-start","durationMs":76}
+2026-10-26T12:16:11.016000+00:00 2026/10/26/[$LATEST]1cd33ad6 2026-10-26T12:16:11.014Z  b37c833e-abcf-4570-bdad-827166ce0636    INFO    --> GET /whoami 200 3ms
+```
+
+The cold start is **76 ms** (`durationMs` from module load to first request); the handler itself takes **3 ms** once warm.
 
 ---
 
