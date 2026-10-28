@@ -1,3 +1,20 @@
 node_modules/
 dist/
 *.zip
+
+# Local Terraform directory
+.terraform/
+
+# State files (contain sensitive data - never commit)
+*.tfstate
+*.tfstate.backup
+.terraform/terraform.tfstate
+
+# Saved plan files
+*.tfplan
+tfplan
+
+# Variable files with secrets (if you create them)
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars

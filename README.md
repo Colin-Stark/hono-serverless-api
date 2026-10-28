@@ -487,8 +487,11 @@ aws apigatewayv2 get-apis --query "Items[].[Name,ApiId,ApiEndpoint]" --output ta
 | `--query "Items[].[Name,ApiId]"` | A filter on the result, explained below |
 | `--output table` | Print the filtered result as a table instead of JSON |
 
+
+## NOTE
 You will most likely see something like `hono-api| 59eff59d7f | https://59eff59d7f.execute-api.us-east-1.amazonaws.com`. That endpoint address is what a real AWS account returns. If you are testing with Floci, the execute address will instead be `http://59eff59d7f.execute-api.localhost.floci.io:4566`.
 
+- people also make the mistake and use https instead of http, this is a local development so run it with http
 
 ## 12. Recruiter and hiring-manager FAQ
 
