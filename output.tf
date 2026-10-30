@@ -25,9 +25,6 @@ output "api_gateway_endpoint" {
   value       = aws_apigatewayv2_api.hono_api.api_endpoint
 }
 
-output "api_gateway_stage" {
-  description = "Stage of the API Gateway"
-  value       = aws_apigatewayv2_stage.hono_api_stage.name
-}
 
-  
+
+

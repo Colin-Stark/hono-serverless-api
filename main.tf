@@ -44,6 +44,14 @@ resource "aws_lambda_function" "hono_serverless_floci" {
   runtime       = "nodejs22.x"
   memory_size   = 256
   timeout       = 15
+
+  environment {
+    variables = {
+      USERS_TABLE_NAME = var.users_table_name,
+      AWS_REGION       = var.aws_region,
+      AWS_ENDPOINT     = var.aws_endpoint
+    }
+  }
 }
 
 resource "aws_apigatewayv2_api" "hono_api" {
@@ -70,4 +78,48 @@ resource "aws_apigatewayv2_stage" "default_stage" {
   api_id      = aws_apigatewayv2_api.hono_api.id
   name        = "$default"
   auto_deploy = true
+}
+
+
+resource "aws_dynamodb_table" "users_table" {
+  name         = var.users_table_name
+  hash_key     = "userId"
+  billing_mode = "PAY_PER_REQUEST"
+
+  attribute {
+    name = "userId"
+    type = "S"
+  }
+
+  attribute {
+    name = "email"
+    type = "S"
+  }
+
+  attribute {
+    name = "phoneNumber"
+    type = "N"
+  }
+
+
+  global_secondary_index {
+    name            = "email-index"
+    projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "email"
+      key_type       = "HASH"
+    }
+  }
+
+  global_secondary_index {
+    name            = "PhoneNumber-index"
+    projection_type = "ALL"
+
+    key_schema {
+      attribute_name = "phoneNumber"
+      key_type       = "HASH"
+    }
+  }
+
 }
