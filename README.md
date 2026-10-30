@@ -7,6 +7,7 @@
 ![Hono](https://img.shields.io/badge/Hono-4.x-E36002?logo=hono&logoColor=white)
 ![AWS Lambda](https://img.shields.io/badge/AWS-Lambda-FF9900?logo=awslambda&logoColor=white)
 ![API Gateway](https://img.shields.io/badge/API%20Gateway-HTTP%20API%20v2-E7157B)
+![DynamoDB](https://img.shields.io/badge/DynamoDB-Users%20table-4053D6?logo=amazon-dynamodb&logoColor=white)
 
 **Author:** Collins Olokpedje
 
@@ -38,12 +39,13 @@ It contains:
 
 | Piece | Purpose |
 |---|---|
-| `src/index.ts` | A Hono app with four routes, exported as a Lambda handler via `@hono/aws-lambda` |
-| `createFunction.ps1` | Creates the Lambda function (`nodejs22.x`, 256 MB, 15 s timeout) |
-| `createApiGateway.ps1` | Creates an HTTP API with a Lambda proxy integration and an auto-deployed `$default` stage |
+| `src/index.ts` | A Hono app with six routes, exported as a Lambda handler via `@hono/aws-lambda` |
+| `scripts/createFunction.ps1` | Creates the Lambda function (`nodejs22.x`, 256 MB, 15 s timeout) |
+| `scripts/apigatewayv2/createApiGateway.ps1` | Creates an HTTP API with a Lambda proxy integration and an auto-deployed `$default` stage |
+| `scripts/dynamo/createTable.PS1` | Creates the DynamoDB `Users` table (`userId` HASH key, PAY_PER_REQUEST) |
 | `package.json` scripts | Typecheck, bundle, zip and deploy in a single command: `pnpm deploy` |
 
-It is deliberately small. There is no database, auth layer or IaC framework, so every moving part is visible and explainable. The `/whoami` route exposes the live Lambda context so you can observe the runtime (request ID, memory limit, function ARN, version) from the outside.
+It is deliberately small. There is no auth layer or IaC framework requirement (Terraform files are present as optional IaC), so every moving part is visible and explainable. The app persists users to a DynamoDB `Users` table and logs cold-start duration as structured JSON on the first request of each cold start. The `/whoami` route exposes the live Lambda context so you can observe the runtime (request ID, memory limit, function ARN, version) from the outside.
 
 ---
 
@@ -57,7 +59,7 @@ It is deliberately small. There is no database, auth layer or IaC framework, so 
 2. **API Gateway (HTTP API)** matches the catch-all route `ANY /{proxy+}` and, because the integration type is `AWS_PROXY` with payload format **2.0**, serializes the whole request into a JSON *event*.
 3. **Lambda** boots (or reuses) a Node.js 22 execution environment and calls `index.handler(event, context)`.
 4. `@hono/aws-lambda` converts that event into a standard Web `Request` and hands it to the Hono app.
-5. Hono's router picks a handler; the handler returns a standard Web `Response`.
+5. Hono's router picks a handler; the handler returns a standard Web `Response`. User routes (`/users/*`) read from or write to DynamoDB via the AWS SDK.
 6. The adapter converts the `Response` back into the JSON result shape API Gateway expects.
 7. API Gateway turns that result into a real HTTP response for the client.
 8. **IAM** provides the execution role; **CloudWatch Logs** captures everything written to stdout/stderr plus Lambda's `REPORT` lines (duration, billed duration, memory used, init duration).
@@ -80,7 +82,7 @@ flowchart TD
     E --> F["Lambda service invokes function hono-api<br/>(synchronous RequestResponse)"]
 
     F --> G{"Warm execution<br/>environment available?"}
-    G -- "no: cold start" --> H["Init phase<br/>download zip, start Node 22,<br/>evaluate index.mjs once:<br/>create Hono app, register routes"]
+    G -- "no: cold start" --> H["Init phase<br/>download zip, start Node 22,<br/>evaluate index.mjs once:<br/>create Hono app, register routes,<br/>create DynamoDB client, log cold start"]
     G -- "yes: warm" --> I
     H --> I["Node runtime calls<br/>handler(event, context)"]
 
@@ -92,11 +94,15 @@ flowchart TD
     L -- "GET /hello/:name" --> R2["c.json({ message })"]
     L -- "POST /echo" --> R3["await c.req.json() then c.json()"]
     L -- "GET /whoami" --> R4["read c.env.lambdaContext then c.json()"]
+    L -- "GET /users/:userId" --> R5["DynamoDB GetItem, return user or 404"]
+    L -- "POST /users" --> R6["validate body, DynamoDB PutItem, return user"]
 
     R1 --> M["Web Response"]
     R2 --> M
     R3 --> M
     R4 --> M
+    R5 --> M
+    R6 --> M
     L404 --> M
 
     M --> N["Adapter converts Response<br/>statusCode, headers, cookies,<br/>body, isBase64Encoded"]
@@ -119,6 +125,7 @@ sequenceDiagram
     participant RT as Node.js 22 Runtime
     participant AD as @hono/aws-lambda
     participant H as Hono App
+    participant DDB as DynamoDB
     participant CW as CloudWatch Logs
 
     C->>AG: POST /echo (JSON body)
@@ -128,7 +135,7 @@ sequenceDiagram
 
     alt Cold start
         LS->>RT: Create environment, load dist/index.mjs
-        RT->>H: Module scope: new Hono(), register routes
+        RT->>H: Module scope: new Hono(), register routes,<br/>create DynamoDB client
     end
 
     LS->>RT: handler(event, context)
@@ -275,6 +282,8 @@ The adapter is a thin, synchronous mapping with no network calls. In practice th
 | `GET` | `/hello/:name` | Greets by path parameter | `{ "message": "Hello John!" }` |
 | `POST` | `/echo` | Echoes `message` from the JSON body | `{ "message": "Hello, World!" }` |
 | `GET` | `/whoami` | Exposes Lambda runtime context | `{ "function": "hono-api", "requestId": "...", "version": "$LATEST", "memoryLimitInMB": "256", "awsRequestId": "...", "invokedFunctionArn": "arn:aws:lambda:..." }` |
+| `GET` | `/users/:userId` | Reads a user from DynamoDB | `{ "userId": "...", "name": "...", "email": "..." }` or `404 { "error": "User not found" }` |
+| `POST` | `/users` | Creates a user in DynamoDB | `{ "userId": "...", "name": "...", "email": "..." }` or `400` on validation error |
 
 ```bash
 BASE="https://<api-id>.execute-api.us-east-1.amazonaws.com"   # or your emulator's invoke URL
@@ -283,6 +292,8 @@ curl "$BASE/"
 curl "$BASE/hello/Ada"
 curl -X POST "$BASE/echo" -H "content-type: application/json" -d '{"message":"Hello, World!"}'
 curl "$BASE/whoami"
+curl "$BASE/users/abc123"
+curl -X POST "$BASE/users" -H "content-type: application/json" -d '{"userId":"abc123","name":"Ada","email":"ada@example.com","phoneNumber":"555-0100","address":"123 Main St"}'
 ```
 
 ---
@@ -295,10 +306,18 @@ curl "$BASE/whoami"
 │   └── index.ts            # Hono app + Lambda handler export
 ├── docs/
 │   └── architecture.svg    # AWS architecture diagram used above
-├── createFunction.ps1      # aws lambda create-function
-├── createApiGateway.ps1    # aws apigatewayv2 create-api / integration / route / stage
+├── scripts/
+│   ├── createFunction.ps1               # aws lambda create-function
+│   ├── apigatewayv2/
+│   │   └── createApiGateway.ps1         # aws apigatewayv2 create-api / integration / route / stage
+│   └── dynamo/
+│       └── createTable.PS1              # aws dynamodb create-table (Users table)
+├── main.tf                              # Terraform configuration
+├── variable.tf                          # Terraform variables
+├── output.tf                            # Terraform outputs
 ├── package.json            # scripts: typecheck, build, zip, package, deploy
 ├── tsconfig.json           # strict TS, noEmit, Bundler module resolution
+├── CLAUDE.md               # Claude Code guidance for this repo
 └── README.md
 ```
 
@@ -337,19 +356,25 @@ pnpm install
 # 0. (Emulator only) point the CLI at Floci. Check Floci's docs for its endpoint/port.
 $env:AWS_ENDPOINT_URL = "http://localhost:4566"
 $env:AWS_ACCESS_KEY_ID = "test"; $env:AWS_SECRET_ACCESS_KEY = "test"; $env:AWS_DEFAULT_REGION = "us-east-1"
+$env:USERS_TABLE_NAME = "Users"
 
 # 1. Build the artifact
 pnpm package
 
-# 2. Create the function (first time only)
-./createFunction.ps1
+# 2. Create the DynamoDB table (first time only)
+./scripts/dynamo/createTable.PS1
 
-# 3. Create the HTTP API, integration, route and stage (first time only)
-./createApiGateway.ps1
+# 3. Create the function (first time only)
+./scripts/createFunction.ps1
 
-# 4. Every change afterwards
+# 4. Create the HTTP API, integration, route and stage (first time only)
+./scripts/apigatewayv2/createApiGateway.ps1
+
+# 5. Every change afterwards
 pnpm deploy
 ```
+
+> The DynamoDB client inside `src/index.ts` reads `AWS_ENDPOINT` and `AWS_REGION` from the environment at module scope. When running against Floci, set `AWS_ENDPOINT=http://localhost:4566` and `AWS_REGION=us-east-1` alongside `USERS_TABLE_NAME`.
 
 ---
 
@@ -376,6 +401,19 @@ pnpm deploy
 | 3 | `create-route --route-key "ANY /{proxy+}"` | One greedy route: **every** method and path goes to the same Lambda; Hono does the real routing |
 | 4 | `create-stage --stage-name '$default' --auto-deploy` | A stage with no path prefix; changes deploy automatically |
 
+### `createTable.PS1` (`scripts/dynamo/`)
+
+Creates the DynamoDB `Users` table:
+
+| Setting | Value |
+|---|---|
+| Table name | `Users` |
+| Attribute | `userId` (String) |
+| Key schema | `userId` HASH |
+| Billing mode | `PAY_PER_REQUEST` |
+
+Run this once (after `pnpm package`) before invoking the `/users` routes, whether locally against Floci or on real AWS.
+
 **Design takeaway:** API Gateway is intentionally "dumb" here (a pass-through), and routing logic lives in code where it can be unit-tested, versioned and moved. This is often called the **"Lambdalith"** or single-function API pattern.
 
 ---
@@ -384,7 +422,7 @@ pnpm deploy
 
 ```mermaid
 flowchart LR
-    SRC["src/index.ts<br/>Hono app"] --> TSC["tsc<br/>strict typecheck, noEmit"]
+    SRC["src/index.ts<br/>Hono app + DynamoDB client"] --> TSC["tsc<br/>strict typecheck, noEmit"]
     TSC -- "errors" --> FAIL["Stop: pipeline fails"]
     TSC -- "ok" --> ESB["esbuild<br/>bundle + tree-shake<br/>ESM, node22"]
     ESB --> OUT["dist/index.mjs<br/>single file, deps inlined"]
@@ -498,7 +536,7 @@ You will most likely see something like `hono-api| 59eff59d7f | https://59eff59d
 <details>
 <summary><strong>What does this project demonstrate about the author?</strong></summary>
 
-End-to-end ownership of a small cloud service: framework choice with reasoning, TypeScript in strict mode, a reproducible bundle/package/deploy pipeline, hands-on AWS CLI infrastructure (Lambda, API Gateway HTTP API, IAM, CloudWatch), understanding of how requests are translated across service boundaries, and the ability to document and explain all of it.
+End-to-end ownership of a small cloud service: framework choice with reasoning, TypeScript in strict mode, a reproducible bundle/package/deploy pipeline, hands-on AWS CLI infrastructure (Lambda, API Gateway HTTP API, DynamoDB, IAM, CloudWatch), understanding of how requests are translated across service boundaries, and the ability to document and explain all of it.
 </details>
 
 <details>
@@ -522,7 +560,7 @@ It keeps infrastructure trivial and routing in testable code. The downside is th
 <details>
 <summary><strong>How do you handle cold starts?</strong></summary>
 
-Design choices already in place: a single esbuild bundle with dependencies inlined, no heavy init work, app and routes created once at module scope (so warm invocations skip it), and a modern Node 22 runtime. Further levers if needed: more memory (more CPU), `hono/tiny`, trimming imports, provisioned concurrency, or SnapStart where supported for the runtime. Measure using the `Init Duration` field in CloudWatch `REPORT` lines.
+Design choices already in place: a single esbuild bundle with dependencies inlined, no heavy init work, app and routes created once at module scope (so warm invocations skip it), and a modern Node 22 runtime. A middleware logs cold-start duration (module load to first request) as structured JSON on the first invocation of each cold start. Further levers if needed: more memory (more CPU), `hono/tiny`, trimming imports, provisioned concurrency, or SnapStart where supported for the runtime. Measure using the `Init Duration` field in CloudWatch `REPORT` lines.
 </details>
 
 <details>
@@ -532,7 +570,7 @@ Design choices already in place: a single esbuild bundle with dependencies inlin
 - Add authentication at the edge: a **JWT authorizer** on API Gateway, or Hono's `jwt()` middleware.
 - Add **CORS** (`hono/cors`) restricted to known origins and **secure headers** (`hono/secure-headers`).
 - Enable **throttling** on the stage and consider **AWS WAF**.
-- Validate input with **Zod** (`@hono/zod-validator`). Note that `/echo` currently trusts the body shape.
+- Validate input with **Zod** (`@hono/zod-validator`). Note that `/echo` currently trusts the body shape, and `/users` trusts the incoming user object.
 - Keep secrets in **SSM Parameter Store / Secrets Manager**, never in the bundle.
 - Enforce HTTPS and, for custom domains, ACM certificates.
 </details>
@@ -540,7 +578,7 @@ Design choices already in place: a single esbuild bundle with dependencies inlin
 <details>
 <summary><strong>How would you observe and debug it?</strong></summary>
 
-CloudWatch Logs and `REPORT` metrics out of the box; structured JSON logs via **Lambda Powertools** or `hono/logger`; **X-Ray** or OpenTelemetry for tracing; alarms on `Errors`, `Throttles`, `Duration` p95/p99 and API Gateway `5xx`. The `/whoami` endpoint exposes the request ID so a client-visible response can be correlated with a specific log stream.
+CloudWatch Logs and `REPORT` metrics out of the box; structured JSON logs via **Lambda Powertools** or `hono/loger`; **X-Ray** or OpenTelemetry for tracing; alarms on `Errors`, `Throttles`, `Duration` p95/p99 and API Gateway `5xx`. The `/whoami` endpoint exposes the request ID so a client-visible response can be correlated with a specific log stream. Cold-start duration is logged as structured JSON (`{"event":"cold-start","durationMs":N}`) on the first request of each cold start.
 </details>
 
 <details>
@@ -555,13 +593,13 @@ CloudWatch Logs and `REPORT` metrics out of the box; structured JSON logs via **
 <details>
 <summary><strong>How would you evolve this into infrastructure as code and CI/CD?</strong></summary>
 
-Replace the PowerShell scripts with **AWS CDK, SAM or Terraform** so the function, role, API, route, integration, permissions and alarms are declared, reviewable and reproducible. Add a GitHub Actions pipeline: install, typecheck, test, build, deploy to staging, smoke test, then promote using Lambda **versions and aliases** (weighted aliases enable canary releases and instant rollback).
+Terraform files (`main.tf`, `variable.tf`, `output.tf`) are already present as optional IaC. Add a GitHub Actions pipeline: install, typecheck, test, build, deploy to staging, smoke test, then promote using Lambda **versions and aliases** (weighted aliases enable canary releases and instant rollback).
 </details>
 
 <details>
 <summary><strong>What about cost and scaling?</strong></summary>
 
-Costs scale with requests, duration and memory; API Gateway HTTP API bills per million requests. Lambda scales out automatically by adding concurrent execution environments, bounded by account/function concurrency limits you can raise or reserve. Always verify current prices on the AWS pricing pages for your region.
+Costs scale with requests, duration and memory; API Gateway HTTP API bills per million requests. DynamoDB PAY_PER_REQUEST bills per read/write request. Lambda scales out automatically by adding concurrent execution environments, bounded by account/function concurrency limits you can raise or reserve. Always verify current prices on the AWS pricing pages for your region.
 </details>
 
 <details>
@@ -573,7 +611,7 @@ esbuild is extremely fast and produces a single tree-shaken file; ESM is the mod
 <details>
 <summary><strong>Is this production-ready?</strong></summary>
 
-It is a production-*minded* reference: the structure, pipeline and patterns are what you would use, but it intentionally omits auth, validation, IaC, tests and alarms. The [roadmap](#13-known-quirks-and-roadmap) lists exactly what would be added.
+It is a production-*minded* reference: the structure, pipeline and patterns are what you would use, but it intentionally omits auth, validation, tests and alarms. The [roadmap](#13-known-quirks-and-roadmap) lists exactly what would be added.
 </details>
 
 <details>
@@ -594,16 +632,18 @@ Yes. Because the app speaks `Request`/`Response`, you swap `handle(app)` for the
 4. **Placeholder identities.** `000000000000` and `role/lambda-role` are emulator placeholders; use real values and a least-privilege role on AWS.
 5. **Windows-specific zip step.** `pnpm zip` uses PowerShell's `Compress-Archive`. On macOS/Linux, replace it with `zip -j function.zip dist/index.mjs`.
 6. **Entry point location.** The build script and `tsconfig.json` expect `src/index.ts`; make sure the file lives there.
+7. **DynamoDB env vars.** The client reads `AWS_ENDPOINT` (not `AWS_ENDPOINT_URL`) and `AWS_REGION` at module scope, plus `USERS_TABLE_NAME` for the table name. Set all three when running locally against Floci.
 
 ### Roadmap
 
-- [ ] Input validation with Zod on `/echo`
+- [ ] Input validation with Zod on `/echo` and `/users`
 - [ ] Unit tests using `app.request()` plus a sample-event handler test
-- [ ] Replace PowerShell scripts with CDK/SAM/Terraform
 - [ ] CI/CD with GitHub Actions, Lambda versions and aliases
 - [ ] Structured logging, X-Ray tracing, CloudWatch alarms
 - [ ] JWT authorizer and CORS configuration
+- [x] DynamoDB `Users` table (`GET /users/:userId`, `POST /users`)
 - [x] Cold-start benchmark: `hono` vs `hono/tiny` vs raw handler, with results published in this README — see [Cold-start benchmark](#cold-start-benchmark) below
+- [x] Terraform IaC files (`main.tf`, `variable.tf`, `output.tf`)
 
 ### Cold-start benchmark
 
